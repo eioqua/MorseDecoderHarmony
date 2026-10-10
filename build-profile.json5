@@ -1,0 +1,56 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B96C38004C1EF9CD64583341BD9D8D555708C27270F4AE64AB0D27F07B4335F0BF1BE3FEF2DA5F8",
+          "profile": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.p12",
+          "storePassword": "0000001B458042301D1A73DF8E36FD4EB2B911761E5D311970F35EF751C04EBF080ABE60349B8A3A834DFB"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.1.1(24)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

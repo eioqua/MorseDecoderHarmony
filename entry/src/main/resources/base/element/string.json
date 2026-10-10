@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "摩斯电码编解码模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "摩斯电码解码器"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "摩斯解码器"
+    },
+    {
+      "name": "mic_reason",
+      "value": "用于通过麦克风收听摩斯电码声音并实时解码"
+    }
+  ]
+}
