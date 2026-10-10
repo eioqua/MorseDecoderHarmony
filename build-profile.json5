@@ -7,11 +7,11 @@
         "material": {
           "certpath": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B96C38004C1EF9CD64583341BD9D8D555708C27270F4AE64AB0D27F07B4335F0BF1BE3FEF2DA5F8",
+          "keyPassword": "0000001BBC697E3172A19F9A2645F3AF0D1B4F3BF6411F8CCDEA3AE5A685D5A2B9E9F443E9CB06C0DE9DCB",
           "profile": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "C:\\Users\\PC\\.ohos\\config\\default_MorseDecoder_DUnL5qVZBgj0Q0HwaHK8a52wG9SuzG6A0xr81E06XIc=.p12",
-          "storePassword": "0000001B458042301D1A73DF8E36FD4EB2B911761E5D311970F35EF751C04EBF080ABE60349B8A3A834DFB"
+          "storePassword": "0000001B81D190C26CC727B2BCD784171FFF9422705BB3D352C3053EBFFDB5E7F787D2CB59FDD222580CE3"
         }
       }
     ],
