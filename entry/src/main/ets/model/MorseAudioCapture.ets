@@ -3,6 +3,7 @@ import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { MorseCodec } from './MorseCodec';
 import { MorseAudio, MorseToneDetector, MorseToneOptions } from './MorseAudio';
+import { QsoAudioRecorder } from './QsoAudio';
 
 /**
  * 声音来源
@@ -43,6 +44,10 @@ export interface MorseCaptureStatus {
   morse: string;
   text: string;
   markCount: number;
+  /** 已录音时长（毫秒），0 表示还没有录到内容 */
+  audioMs: number;
+  /** 录音缓冲是否已满（达到上限后不再增长） */
+  audioFull: boolean;
 }
 
 /** 一种采集参数组合，创建失败就换下一种 */
@@ -142,6 +147,8 @@ export class MorseAudioCapture {
   private ring: boolean = true;
   /** 识别参数（来自设置页）：开始聆听时交给检测器，聆听中也支持实时改 */
   private toneOptions: MorseToneOptions = {};
+  /** 录音缓冲（实时降采样成 8kHz，供通联日志保存） */
+  private recorder: QsoAudioRecorder | undefined = undefined;
 
   constructor(context: common.UIAbilityContext, options?: MorseToneOptions) {
     this.context = context;
@@ -275,15 +282,21 @@ export class MorseAudioCapture {
     this.sampleRate = rate;
     this.channels = chans;
     this.detector = new MorseToneDetector(rate, this.toneOptions);
+    this.recorder = new QsoAudioRecorder(rate, chans);
     const channels = chans;
-    // 只做轻活：16bit 交错 PCM -> 单声道浮点 -> 检测器
+    // 只做轻活：16bit 交错 PCM -> 单声道浮点 -> 检测器 + 录音缓冲
     try {
       this.capturer.on('readData', (buffer: ArrayBuffer) => {
         const det = this.detector;
         if (det === undefined) {
           return;
         }
-        det.push(MorseAudio.pcm16ToMonoFloat(buffer, channels));
+        const mono = MorseAudio.pcm16ToMonoFloat(buffer, channels);
+        det.push(mono);
+        const recorder = this.recorder;
+        if (recorder !== undefined) {
+          recorder.pushMono(mono);
+        }
       });
     } catch (err) {
       this.error = '注册音频回调失败：' + this.describe(err);
@@ -348,12 +361,34 @@ export class MorseAudioCapture {
     }
   }
 
-  /** 清空已识别的摩斯码，继续听 */
+  /** 清空已识别的摩斯码和已录音频，继续听 */
   clear(): void {
     const det = this.detector;
     if (det !== undefined) {
       det.reset();
     }
+    const recorder = this.recorder;
+    if (recorder !== undefined) {
+      recorder.clear();
+    }
+  }
+
+  /** 录音时长（毫秒） */
+  recordingMs(): number {
+    const recorder = this.recorder;
+    if (recorder === undefined) {
+      return 0;
+    }
+    return recorder.durationMs();
+  }
+
+  /** 取录音的 WAV 数据（不影响缓冲，停止聆听后仍可取；无录音返回 undefined） */
+  recordedWav(): ArrayBuffer | undefined {
+    const recorder = this.recorder;
+    if (recorder === undefined || recorder.isEmpty()) {
+      return undefined;
+    }
+    return recorder.toWav();
   }
 
   isRunning(): boolean {
@@ -373,6 +408,13 @@ export class MorseAudioCapture {
     let morse = '';
     let text = '';
     let marks = 0;
+    let audioMs = 0;
+    let audioFull = false;
+    const recorder = this.recorder;
+    if (recorder !== undefined) {
+      audioMs = recorder.durationMs();
+      audioFull = recorder.isFull();
+    }
     if (det !== undefined) {
       const st = det.status();
       toneOn = st.toneOn;
@@ -408,7 +450,9 @@ export class MorseAudioCapture {
       locked: locked,
       morse: morse,
       text: text,
-      markCount: marks
+      markCount: marks,
+      audioMs: audioMs,
+      audioFull: audioFull
     };
     return out;
   }

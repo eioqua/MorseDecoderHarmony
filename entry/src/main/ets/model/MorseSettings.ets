@@ -14,6 +14,9 @@ export const KEY_TOLERANCE = 'mdToleranceHz';
 export const KEY_DENOISE = 'mdDenoise';
 export const KEY_SENSITIVITY = 'mdSensitivity';
 export const KEY_COLOR_MODE = 'mdColorMode';
+/** 通联日志用：我方呼号与常用设备（新建记录时预填） */
+export const KEY_MY_CALL = 'mdMyCall';
+export const KEY_MY_RIG = 'mdMyRig';
 
 /** 0 = 自动选频（扫到音调后锁定）；>0 = 固定在这个频点，永不换频 */
 export const DEFAULT_TONE_HZ = 0;
@@ -25,6 +28,8 @@ export const DEFAULT_DENOISE = 40;
 export const DEFAULT_SENSITIVITY = 50;
 /** 外观：system | light | dark */
 export const DEFAULT_COLOR_MODE = 'system';
+export const DEFAULT_MY_CALL = '';
+export const DEFAULT_MY_RIG = '';
 
 export const TONE_HZ_MIN = 300;
 export const TONE_HZ_MAX = 1500;
@@ -93,4 +98,6 @@ export function registerMorseSettings(): void {
   PersistentStorage.persistProp<number>(KEY_DENOISE, DEFAULT_DENOISE);
   PersistentStorage.persistProp<number>(KEY_SENSITIVITY, DEFAULT_SENSITIVITY);
   PersistentStorage.persistProp<string>(KEY_COLOR_MODE, DEFAULT_COLOR_MODE);
+  PersistentStorage.persistProp<string>(KEY_MY_CALL, DEFAULT_MY_CALL);
+  PersistentStorage.persistProp<string>(KEY_MY_RIG, DEFAULT_MY_RIG);
 }

@@ -2,11 +2,26 @@ import { MorseCodec, MorseDecodeResult, MorseEntry } from '../model/MorseCodec';
 import { MorseAudioCapture, MorseCaptureSource, MorseCaptureStatus } from '../model/MorseAudioCapture';
 import { MorseToneOptions } from '../model/MorseAudio';
 import {
+  bandOf,
+  freqText,
+  isoFromUtcText,
+  newQsoRecord,
+  QsoLog,
+  QsoRecord,
+  recordTime,
+  toAdif,
+  toText,
+  utcFileStamp,
+  utcText
+} from '../model/QsoLog';
+import {
   buildToneOptions,
   denoiseToMinMarkMs,
   denoiseToPurity,
   DEFAULT_COLOR_MODE,
   DEFAULT_DENOISE,
+  DEFAULT_MY_CALL,
+  DEFAULT_MY_RIG,
   DEFAULT_SENSITIVITY,
   DEFAULT_TOLERANCE,
   DEFAULT_TONE_HZ,
@@ -14,6 +29,8 @@ import {
   DENOISE_MIN,
   KEY_COLOR_MODE,
   KEY_DENOISE,
+  KEY_MY_CALL,
+  KEY_MY_RIG,
   KEY_SENSITIVITY,
   KEY_TOLERANCE,
   KEY_TONE_HZ,
@@ -39,6 +56,7 @@ const PAGE_LISTEN = 0;
 const PAGE_CODEC = 1;
 const PAGE_TABLE = 2;
 const PAGE_SETTINGS = 3;
+const PAGE_LOG = 4;
 /** 编解码页的两种模式 */
 const MODE_DECODE = 0;
 const MODE_ENCODE = 1;
@@ -129,13 +147,51 @@ struct Index {
   @State captureText: string = '';
   @State captureMarkCount: number = 0;
   @State captureSampleRate: number = 0;
+  @State captureAudioMs: number = 0;
+  /** 是否有可挂到日志上的录音（正在听或刚听完） */
+  @State logAudioReady: boolean = false;
   private capture: MorseAudioCapture | undefined = undefined;
   private captureTimer: number = -1;
+  /** 停止聆听后保留的最后一段录音：停下来也还能存进通联日志 */
+  private lastWav: ArrayBuffer | undefined = undefined;
+  private lastAudioMs: number = 0;
+
+  // ---------------- 通联日志 ----------------
+  @StorageLink(KEY_MY_CALL) myCallSetting: string = DEFAULT_MY_CALL;
+  @StorageLink(KEY_MY_RIG) myRigSetting: string = DEFAULT_MY_RIG;
+  @State logRecords: QsoRecord[] = [];
+  @State logEditing: boolean = false;
+  @State logMessage: string = '';
+  /** 正在编辑的记录 id（''＝新建） */
+  @State logEditId: string = '';
+  @State logEditAudioFile: string = '';
+  @State logEditAudioMs: number = 0;
+  /** 本次要写盘的录音时长（0＝没有新录音） */
+  @State pendingMs: number = 0;
+  private pendingWav: ArrayBuffer | undefined = undefined;
+  private log: QsoLog | undefined = undefined;
+  /** 编辑表单：一个字段一个状态，改哪块只重绘哪块 */
+  @State fTime: string = '';
+  @State fCall: string = '';
+  @State fMyCall: string = '';
+  @State fFreq: string = '';
+  @State fBand: string = '';
+  @State fMode: string = 'CW';
+  @State fRstSent: string = '599';
+  @State fRstRcvd: string = '599';
+  @State fQth: string = '';
+  @State fRig: string = '';
+  @State fAntenna: string = '';
+  @State fPower: string = '';
+  @State fNotes: string = '';
+  @State fMorse: string = '';
+  @State fText: string = '';
 
   aboutToAppear(): void {
     this.table = MorseCodec.table();
     this.autoTone = this.toneHzSetting <= 0;
     this.applyColorMode();
+    this.initLog();
   }
 
   aboutToDisappear(): void {
@@ -256,6 +312,227 @@ struct Index {
     this.sidebarIndex = PAGE_CODEC;
   }
 
+  // ---------------- 通联日志 ----------------
+
+  private initLog(): void {
+    const ctx = this.getUIContext().getHostContext();
+    if (ctx === undefined) {
+      return;
+    }
+    this.log = new QsoLog(ctx as common.UIAbilityContext);
+    this.logRecords = this.log.load();
+  }
+
+  /** 频率文本 -> kHz（非法输入按 0 处理） */
+  private freqToKhz(text: string): number {
+    const value = Number.parseFloat(text);
+    if (Number.isNaN(value) || value <= 0) {
+      return 0;
+    }
+    return value;
+  }
+
+  /** 表单字段 -> 记录 */
+  private draftFromFields(): QsoRecord {
+    const record = newQsoRecord(this.fMyCall, this.fRig);
+    if (this.logEditId.length > 0) {
+      record.id = this.logEditId;
+    }
+    const iso = isoFromUtcText(this.fTime);
+    record.timeUtc = iso.length > 0 ? iso : new Date().toISOString();
+    record.call = this.fCall;
+    record.myCall = this.fMyCall;
+    record.freqKhz = this.freqToKhz(this.fFreq);
+    record.band = this.fBand.length > 0 ? this.fBand : bandOf(record.freqKhz);
+    record.mode = this.fMode;
+    record.rstSent = this.fRstSent;
+    record.rstRcvd = this.fRstRcvd;
+    record.qth = this.fQth;
+    record.rig = this.fRig;
+    record.antenna = this.fAntenna;
+    record.powerW = this.fPower;
+    record.notes = this.fNotes;
+    record.morse = this.fMorse;
+    record.text = this.fText;
+    record.audioFile = this.logEditAudioFile;
+    record.audioMs = this.logEditAudioMs;
+    return record;
+  }
+
+  /** 记录 -> 表单字段 */
+  private loadFields(record: QsoRecord): void {
+    this.logEditId = record.id;
+    this.fTime = utcText(recordTime(record));
+    this.fCall = record.call;
+    this.fMyCall = record.myCall.length > 0 ? record.myCall : this.myCallSetting;
+    this.fFreq = record.freqKhz > 0 ? record.freqKhz.toFixed(1) : '';
+    this.fBand = record.band;
+    this.fMode = record.mode.length > 0 ? record.mode : 'CW';
+    this.fRstSent = record.rstSent;
+    this.fRstRcvd = record.rstRcvd;
+    this.fQth = record.qth;
+    this.fRig = record.rig.length > 0 ? record.rig : this.myRigSetting;
+    this.fAntenna = record.antenna;
+    this.fPower = record.powerW;
+    this.fNotes = record.notes;
+    this.fMorse = record.morse;
+    this.fText = record.text;
+    this.logEditAudioFile = record.audioFile;
+    this.logEditAudioMs = record.audioMs;
+    this.logMessage = '';
+  }
+
+  /** 新建记录：预填我方呼号/设备，并带上刚识别到的摩斯码与录音 */
+  private startNewLog(): void {
+    const record = newQsoRecord(this.myCallSetting, this.myRigSetting);
+    record.morse = this.captureMorse;
+    record.text = this.captureText;
+    const cap = this.capture;
+    let wav: ArrayBuffer | undefined = undefined;
+    let ms = 0;
+    if (cap !== undefined) {
+      wav = cap.recordedWav();
+      ms = cap.recordingMs();
+    } else {
+      wav = this.lastWav;
+      ms = this.lastAudioMs;
+    }
+    if (wav !== undefined) {
+      this.pendingWav = wav;
+      this.pendingMs = ms;
+      record.audioMs = ms;
+    } else {
+      this.pendingWav = undefined;
+      this.pendingMs = 0;
+    }
+    this.loadFields(record);
+    this.logEditing = true;
+    this.sidebarIndex = PAGE_LOG;
+  }
+
+  private editLogEntry(record: QsoRecord): void {
+    this.pendingWav = undefined;
+    this.pendingMs = 0;
+    this.loadFields(record);
+    this.logEditing = true;
+  }
+
+  /** 保存表单：需要时先把录音写进沙箱，再落库 */
+  private saveLogEntry(): void {
+    const log = this.log;
+    if (log === undefined) {
+      this.toast('日志不可用');
+      return;
+    }
+    const record = this.draftFromFields();
+    const wav = this.pendingWav;
+    if (wav !== undefined) {
+      const fileName = log.saveAudio(record.id, wav);
+      if (fileName.length > 0) {
+        record.audioFile = fileName;
+        if (this.pendingMs > 0) {
+          record.audioMs = this.pendingMs;
+        }
+      } else {
+        this.toast('录音写入失败，记录仍会保存');
+      }
+    }
+    let ok = false;
+    if (this.logEditId.length > 0) {
+      ok = log.update(record);
+    } else {
+      ok = log.add(record);
+    }
+    this.logRecords = log.load();
+    this.pendingWav = undefined;
+    this.pendingMs = 0;
+    this.logEditing = false;
+    this.logMessage = ok ? '已保存' : '保存失败';
+    this.toast(ok ? '已保存到通联日志' : '保存失败');
+  }
+
+  private cancelLogEdit(): void {
+    this.pendingWav = undefined;
+    this.pendingMs = 0;
+    this.logEditing = false;
+  }
+
+  private deleteLogEntry(id: string): void {
+    const log = this.log;
+    if (log === undefined) {
+      return;
+    }
+    log.remove(id);
+    this.logRecords = log.load();
+    if (this.logEditId === id) {
+      this.logEditing = false;
+    }
+    this.toast('已删除记录');
+  }
+
+  /** 列表项 key：带上会变的字段，否则编辑完 ForEach 不会重建这一项 */
+  private logKey(record: QsoRecord): string {
+    return record.id + '|' + record.timeUtc + '|' + record.call + '|' + record.audioMs.toString() +
+      '|' + record.rstSent + '|' + record.rstRcvd + '|' + record.notes.length.toString();
+  }
+
+  /** 列表项副标题：频率 / 波段 / 模式 / 信号报告 / 设备 / 录音 */
+  private logSummaryLine(record: QsoRecord): string {
+    const parts: string[] = [];
+    const freq = freqText(record.freqKhz);
+    if (freq.length > 0) {
+      parts.push(freq);
+    }
+    const band = record.band.length > 0 ? record.band : bandOf(record.freqKhz);
+    if (band.length > 0) {
+      parts.push(band);
+    }
+    if (record.mode.length > 0) {
+      parts.push(record.mode);
+    }
+    if (record.rstSent.length > 0 || record.rstRcvd.length > 0) {
+      parts.push('RST ' + (record.rstSent.length > 0 ? record.rstSent : '-') + '/' +
+        (record.rstRcvd.length > 0 ? record.rstRcvd : '-'));
+    }
+    if (record.rig.length > 0) {
+      parts.push(record.rig);
+    }
+    if (record.audioMs > 0) {
+      parts.push('录音 ' + Math.round(record.audioMs / 1000).toString() + 's');
+    }
+    if (parts.length === 0) {
+      return '（暂无详情）';
+    }
+    return parts.join(' · ');
+  }
+
+  private exportAdif(): void {
+    const text = toAdif(this.logRecords);
+    this.copyToClipboard(text);
+    this.writeExportFile('adif', text);
+  }
+
+  private exportText(): void {
+    const text = toText(this.logRecords);
+    this.copyToClipboard(text);
+    this.writeExportFile('txt', text);
+  }
+
+  /** 除复制外，再往沙箱导出目录写一份文件 */
+  private writeExportFile(ext: string, content: string): void {
+    const log = this.log;
+    if (log === undefined) {
+      return;
+    }
+    const name = 'qso_' + utcFileStamp(new Date()) + '.' + ext;
+    const path = log.writeExport(name, content);
+    if (path.length > 0) {
+      this.logMessage = '已复制到剪贴板，并写出 ' + name;
+    } else {
+      this.logMessage = '已复制到剪贴板（导出文件写入失败）';
+    }
+  }
+
   // ---------------- 声音识别 ----------------
 
   private beginCapture(source: MorseCaptureSource): void {
@@ -282,6 +559,10 @@ struct Index {
     this.captureMorse = '';
     this.captureText = '';
     this.captureMarkCount = 0;
+    this.captureAudioMs = 0;
+    this.logAudioReady = false;
+    this.lastWav = undefined;
+    this.lastAudioMs = 0;
 
     const cap = new MorseAudioCapture(ctx as common.UIAbilityContext, this.toneOptions());
     this.capture = cap;
@@ -347,6 +628,10 @@ struct Index {
     this.captureText = st.text;
     this.captureMarkCount = st.markCount;
     this.captureSampleRate = st.sampleRate;
+    if (st.audioMs > 0) {
+      this.captureAudioMs = st.audioMs;
+      this.logAudioReady = true;
+    }
   }
 
   private stopCapture(): void {
@@ -358,6 +643,14 @@ struct Index {
     this.captureToneOn = false;
     this.captureLevel = 0;
     if (cap !== undefined) {
+      // 停止前先把录音留一份：停下来之后仍然可以存进通联日志
+      const wav = cap.recordedWav();
+      if (wav !== undefined) {
+        this.lastWav = wav;
+        this.lastAudioMs = cap.recordingMs();
+        this.captureAudioMs = this.lastAudioMs;
+        this.logAudioReady = true;
+      }
       cap.stop().then(() => {
         console.info('capture stopped');
       }).catch((err: BusinessError) => {
@@ -374,6 +667,10 @@ struct Index {
     this.captureMorse = '';
     this.captureText = '';
     this.captureMarkCount = 0;
+    this.captureAudioMs = 0;
+    this.lastWav = undefined;
+    this.lastAudioMs = 0;
+    this.logAudioReady = false;
   }
 
   private toast(message: string): void {
@@ -431,6 +728,14 @@ struct Index {
     .borderColor($r('app.color.accent_border'))
   }
 
+  @Styles
+  formInput() {
+    .width('100%')
+    .height(40)
+    .backgroundColor($r('app.color.input_bg'))
+    .borderRadius(8)
+  }
+
   private pageTitle(): string {
     if (this.sidebarIndex === PAGE_CODEC) {
       return this.codecMode === MODE_DECODE ? '摩斯 → 明文' : '明文 → 摩斯';
@@ -440,6 +745,9 @@ struct Index {
     }
     if (this.sidebarIndex === PAGE_SETTINGS) {
       return '设置';
+    }
+    if (this.sidebarIndex === PAGE_LOG) {
+      return this.logEditing ? '编辑通联记录' : '通联日志';
     }
     return '声音识别';
   }
@@ -552,12 +860,12 @@ struct Index {
   SideBarView() {
     Column({ space: 2 }) {
       Column({ space: 2 }) {
-        Text('摩斯解码器')
+        Text('摩斯通联')
           .fontSize(19)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.text_primary'))
           .width('100%')
-        Text('MorseDecoder')
+        Text('MorseTonglian')
           .fontSize(11)
           .fontColor($r('app.color.text_tertiary'))
           .width('100%')
@@ -567,6 +875,7 @@ struct Index {
 
       this.SideItem('声音识别', '麦克风 / 内录实时解码', PAGE_LISTEN)
       this.SideItem('编解码', '手敲摩斯或明文互转', PAGE_CODEC)
+      this.SideItem('通联日志', 'QSO 记录 · 录音 · 导出', PAGE_LOG)
       this.SideItem('码表', '字母 / 数字 / 标点', PAGE_TABLE)
       this.SideItem('设置', '选频 · 降噪 · 外观', PAGE_SETTINGS)
 
@@ -706,6 +1015,7 @@ struct Index {
               this.InfoChip('划 ' + this.captureDashMs.toFixed(0) + ' ms')
               this.InfoChip('纯度 ' + (this.capturePurity * 100).toFixed(0) + '%')
               this.InfoChip('采样 ' + (this.captureSampleRate / 1000).toFixed(1) + ' kHz')
+              this.InfoChip('录音 ' + (this.captureAudioMs / 1000).toFixed(0) + ' s')
             }
             .width('100%')
           }
@@ -808,6 +1118,18 @@ struct Index {
             .onClick(() => this.sendToCodec(this.captureMorse))
         }
         .width('100%')
+
+        Button('保存到通联日志')
+          .width('100%')
+          .height(46)
+          .fontSize(15)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.card_bg'))
+          .fontColor($r('app.color.accent'))
+          .borderWidth(1)
+          .borderColor($r('app.color.accent_border'))
+          .enabled(this.logAudioReady || this.captureMorse.length > 0)
+          .onClick(() => this.startNewLog())
 
         Text('识别不理想时：在「设置」里把识别频率固定成对方电键的侧音频率（例如 700 Hz），再适当提高降噪强度；点长、划长是边听边自适应估算的，多听几个字符后会越来越准。')
           .fontSize(11)
@@ -1075,6 +1397,363 @@ struct Index {
 
   // ---------------- 设置 ----------------
 
+  // ---------------- 通联日志：界面 ----------------
+
+  /** 表单/设置项的小标题行（右边可挂一句提示） */
+  @Builder
+  FieldLabel(text: string, hint: string) {
+    Row() {
+      Text(text)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+      Blank()
+      if (hint.length > 0) {
+        Text(hint)
+          .fontSize(10)
+          .fontColor($r('app.color.text_tertiary'))
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  LogListItem(record: QsoRecord) {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Text(record.call.length > 0 ? record.call : '(未填呼号)')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        if (record.audioMs > 0) {
+          Text('♪')
+            .fontSize(13)
+            .fontColor($r('app.color.accent'))
+        }
+        Blank()
+        Text(utcText(recordTime(record)) + ' UTC')
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+      }
+      .width('100%')
+
+      Text(this.logSummaryLine(record))
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+
+      if (record.morse.length > 0) {
+        Text(record.morse)
+          .fontSize(12)
+          .fontColor($r('app.color.text_tertiary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+      }
+
+      Row({ space: 8 }) {
+        Button('编辑')
+          .layoutWeight(1)
+          .height(34)
+          .fontSize(13)
+          .borderRadius(8)
+          .backgroundColor($r('app.color.input_bg'))
+          .fontColor($r('app.color.accent'))
+          .onClick(() => this.editLogEntry(record))
+        Button('删除')
+          .layoutWeight(1)
+          .height(34)
+          .fontSize(13)
+          .borderRadius(8)
+          .backgroundColor($r('app.color.input_bg'))
+          .fontColor($r('app.color.warn'))
+          .onClick(() => this.deleteLogEntry(record.id))
+      }
+      .width('100%')
+    }
+    .alignItems(HorizontalAlign.Start)
+    .cardStyle()
+  }
+
+  @Builder
+  LogList() {
+    Column({ space: 12 }) {
+      Row() {
+        Text('共 ' + this.logRecords.length.toString() + ' 条记录')
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+        Blank()
+      }
+      .width('100%')
+
+      Button('新建通联记录')
+        .width('100%')
+        .height(46)
+        .fontSize(15)
+        .borderRadius(10)
+        .backgroundColor($r('app.color.accent'))
+        .fontColor($r('app.color.on_accent'))
+        .onClick(() => this.startNewLog())
+
+      if (this.logRecords.length === 0) {
+        Column({ space: 6 }) {
+          Text('还没有记录')
+            .fontSize(14)
+            .fontColor($r('app.color.text_placeholder'))
+            .width('100%')
+          Text('在「声音识别」页听到通联内容后点「保存到通联日志」，会把识别到的摩斯码、译文和当时的录音一起带过来；也可以在这里直接新建，填上对方呼号、时间、信号报告、设备型号等信息。')
+            .fontSize(11)
+            .fontColor($r('app.color.text_tertiary'))
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start)
+        .cardStyle()
+      } else {
+        ForEach(this.logRecords, (record: QsoRecord) => {
+          this.LogListItem(record)
+        }, (record: QsoRecord) => this.logKey(record))
+
+        Row({ space: 8 }) {
+          Button('导出 ADIF')
+            .actionStyle()
+            .fontColor($r('app.color.accent'))
+            .fontSize(14)
+            .onClick(() => this.exportAdif())
+          Button('导出文本')
+            .actionStyle()
+            .fontColor($r('app.color.accent'))
+            .fontSize(14)
+            .onClick(() => this.exportText())
+        }
+        .width('100%')
+
+        Text('导出会同时复制到剪贴板，并在应用沙箱 filesDir/qso_export 里写一份文件。ADIF 可直接导入 N1MM、Log4OM 等日志软件；录音是 8kHz 单声道 WAV，存在 filesDir/qso_audio。')
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+      }
+
+      if (this.logMessage.length > 0) {
+        Text(this.logMessage)
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+          .width('100%')
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  LogEditor() {
+    Column({ space: 10 }) {
+      Row() {
+        Text(this.logEditId.length > 0 ? '编辑记录' : '新建记录')
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+        Blank()
+        Text(this.pendingMs > 0
+          ? ('将保存录音 ' + Math.round(this.pendingMs / 1000).toString() + ' 秒')
+          : (this.logEditAudioMs > 0
+            ? ('已有录音 ' + Math.round(this.logEditAudioMs / 1000).toString() + ' 秒')
+            : '无录音'))
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+      }
+      .width('100%')
+
+      this.FieldLabel('通联时间（UTC）', '格式 YYYY-MM-DD HH:mm')
+      TextInput({ text: this.fTime, placeholder: '2026-10-10 20:56' })
+        .formInput()
+        .onChange((value: string) => {
+          this.fTime = value;
+        })
+
+      this.FieldLabel('对方呼号', 'call')
+      TextInput({ text: this.fCall, placeholder: '如 BG1ABC' })
+        .formInput()
+        .onChange((value: string) => {
+          this.fCall = value;
+        })
+
+      this.FieldLabel('我方呼号', 'station_callsign')
+      TextInput({ text: this.fMyCall, placeholder: '如 BG2XYZ' })
+        .formInput()
+        .onChange((value: string) => {
+          this.fMyCall = value;
+        })
+
+      Row({ space: 8 }) {
+        Column({ space: 4 }) {
+          this.FieldLabel('频率 kHz', '')
+          TextInput({ text: this.fFreq, placeholder: '7023' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fFreq = value;
+            })
+        }
+        .layoutWeight(1)
+
+        Column({ space: 4 }) {
+          this.FieldLabel('波段', '留空自动判断')
+          TextInput({ text: this.fBand, placeholder: '40m' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fBand = value;
+            })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        Column({ space: 4 }) {
+          this.FieldLabel('模式', '')
+          TextInput({ text: this.fMode, placeholder: 'CW' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fMode = value;
+            })
+        }
+        .layoutWeight(1)
+
+        Column({ space: 4 }) {
+          this.FieldLabel('功率', 'tx_pwr')
+          TextInput({ text: this.fPower, placeholder: '100W' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fPower = value;
+            })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        Column({ space: 4 }) {
+          this.FieldLabel('我方发报报告', 'rst_sent')
+          TextInput({ text: this.fRstSent, placeholder: '599' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fRstSent = value;
+            })
+        }
+        .layoutWeight(1)
+
+        Column({ space: 4 }) {
+          this.FieldLabel('我收对方报告', 'rst_rcvd')
+          TextInput({ text: this.fRstRcvd, placeholder: '599' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fRstRcvd = value;
+            })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+
+      this.FieldLabel('对方 QTH', 'qth')
+      TextInput({ text: this.fQth, placeholder: '如 Beijing' })
+        .formInput()
+        .onChange((value: string) => {
+          this.fQth = value;
+        })
+
+      Row({ space: 8 }) {
+        Column({ space: 4 }) {
+          this.FieldLabel('设备型号', 'my_rig')
+          TextInput({ text: this.fRig, placeholder: '如 IC-7300' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fRig = value;
+            })
+        }
+        .layoutWeight(1)
+
+        Column({ space: 4 }) {
+          this.FieldLabel('天线', 'my_ant')
+          TextInput({ text: this.fAntenna, placeholder: '如 DP' })
+            .formInput()
+            .onChange((value: string) => {
+              this.fAntenna = value;
+            })
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+
+      this.FieldLabel('摩斯码', 'app_morse_code')
+      TextArea({ text: this.fMorse, placeholder: '.... . .-.. .-.. ---' })
+        .width('100%')
+        .height(64)
+        .backgroundColor($r('app.color.input_bg'))
+        .borderRadius(8)
+        .onChange((value: string) => {
+          this.fMorse = value;
+        })
+
+      this.FieldLabel('译文', 'app_morse_text')
+      TextArea({ text: this.fText, placeholder: 'HELLO' })
+        .width('100%')
+        .height(64)
+        .backgroundColor($r('app.color.input_bg'))
+        .borderRadius(8)
+        .onChange((value: string) => {
+          this.fText = value;
+        })
+
+      this.FieldLabel('备注', 'comment')
+      TextArea({ text: this.fNotes, placeholder: '信号情况、天气、卡片收发…' })
+        .width('100%')
+        .height(64)
+        .backgroundColor($r('app.color.input_bg'))
+        .borderRadius(8)
+        .onChange((value: string) => {
+          this.fNotes = value;
+        })
+
+      Row({ space: 8 }) {
+        Button('保存')
+          .layoutWeight(1)
+          .height(46)
+          .fontSize(16)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.accent'))
+          .fontColor($r('app.color.on_accent'))
+          .onClick(() => this.saveLogEntry())
+        Button('取消')
+          .layoutWeight(1)
+          .height(46)
+          .fontSize(16)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.card_bg'))
+          .fontColor($r('app.color.accent'))
+          .borderWidth(1)
+          .borderColor($r('app.color.accent_border'))
+          .onClick(() => this.cancelLogEdit())
+      }
+      .width('100%')
+    }
+    .width('100%')
+  }
+
+  @Builder
+  LogView() {
+    Scroll() {
+      Column({ space: 12 }) {
+        if (this.logEditing) {
+          this.LogEditor()
+        } else {
+          this.LogList()
+        }
+      }
+      .padding(16)
+      .width('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .align(Alignment.Top)
+  }
+
   @Builder
   SettingRow(label: string, value: string) {
     Row() {
@@ -1258,6 +1937,29 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
         .cardStyle()
 
+        // ---------- 电台信息（通联日志预填） ----------
+        Column({ space: 6 }) {
+          this.SettingRow('电台信息', '新建日志时预填')
+          this.FieldLabel('我方呼号', 'station_callsign')
+          TextInput({ text: this.myCallSetting, placeholder: '如 BG1ABC' })
+            .formInput()
+            .onChange((value: string) => {
+              this.myCallSetting = value;
+            })
+          this.FieldLabel('常用设备型号', 'my_rig')
+          TextInput({ text: this.myRigSetting, placeholder: '如 IC-7300' })
+            .formInput()
+            .onChange((value: string) => {
+              this.myRigSetting = value;
+            })
+          Text('新建通联记录时会自动填上这两项；日志里每条记录仍可单独修改。')
+            .fontSize(11)
+            .fontColor($r('app.color.text_tertiary'))
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start)
+        .cardStyle()
+
         Button('恢复默认设置')
           .width('100%')
           .height(46)
@@ -1297,8 +1999,10 @@ struct Index {
           this.CodecView()
         } else if (this.sidebarIndex === PAGE_TABLE) {
           this.TableView()
-        } else {
+        } else if (this.sidebarIndex === PAGE_SETTINGS) {
           this.SettingsView()
+        } else {
+          this.LogView()
         }
       }
       .width('100%')

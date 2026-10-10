@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "摩斯电码编解码模块"
+      "value": "摩斯通联：摩斯识别、编解码与通联日志"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "摩斯电码解码器"
+      "value": "业余无线电摩斯通联助手"
     },
     {
       "name": "EntryAbility_label",
-      "value": "摩斯解码器"
+      "value": "摩斯通联"
     },
     {
       "name": "mic_reason",
